@@ -314,44 +314,49 @@ Returns a propertized string with yellow/warning face for non-zero counts."
   (with-current-buffer buffer
     default-directory))
 
-(defun agent-shell-manager--entries ()
-  "Return list of entries for tabulated-list."
+(defun agent-shell-manager--field-value (field buffer)
+  "Return the string value of FIELD for BUFFER.
+FIELD is a symbol: `buffer', `status', `mode', `model', `perms' or `path'."
+  (pcase field
+    ('buffer (agent-shell-manager--get-buffer-name buffer))
+    ('status (agent-shell-manager--get-combined-status buffer))
+    ('mode   (agent-shell-manager--get-session-mode buffer))
+    ('model  (agent-shell-manager--get-model-id buffer))
+    ('perms  (agent-shell-manager--count-pending-permissions buffer))
+    ('path   (abbreviate-file-name (agent-shell-manager--get-cwd buffer)))
+    (_ "")))
+
+(defun agent-shell-manager--sorted-buffers ()
+  "Return live agent-shell buffers, with killed ones pushed to the bottom."
   (let* ((buffers (agent-shell-buffers))
          (buffers (if (listp buffers) buffers (list buffers)))
-         (buffers (seq-filter #'buffer-live-p buffers))
-         (entries (mapcar
-                   (lambda (buffer)
-                     (let* ((buffer-name (buffer-name buffer))
-                            (status (agent-shell-manager--get-combined-status buffer))
-                            (mode (agent-shell-manager--get-session-mode buffer))
-                            (model (agent-shell-manager--get-model-id buffer))
-                            (perms (agent-shell-manager--count-pending-permissions buffer))
-                            (path (abbreviate-file-name (agent-shell-manager--get-cwd buffer))))
-                       (list buffer
-                             (vector
-                              buffer-name
-                              status
-                              mode
-                              model
-                              perms
-                              path))))
-                   buffers)))
-    ;; Sort entries: killed processes go to the bottom
-    (sort entries
+         (buffers (seq-filter #'buffer-live-p buffers)))
+    (sort (copy-sequence buffers)
           (lambda (a b)
-            (let ((status-a (aref (cadr a) 1))
-                  (status-b (aref (cadr b) 1)))
-              ;; Remove text properties to get plain status string
-              (setq status-a (substring-no-properties status-a))
-              (setq status-b (substring-no-properties status-b))
+            (let ((status-a (agent-shell-manager--get-status a))
+                  (status-b (agent-shell-manager--get-status b)))
               (cond
                ;; Both killed or both not killed - maintain original order (stable)
-               ((and (string= status-a "Killed") (string= status-b "Killed")) nil)
-               ((and (not (string= status-a "Killed")) (not (string= status-b "Killed"))) nil)
+               ((and (string= status-a "killed") (string= status-b "killed")) nil)
+               ((and (not (string= status-a "killed")) (not (string= status-b "killed"))) nil)
                ;; a is killed, b is not - a goes after b
-               ((string= status-a "Killed") nil)
+               ((string= status-a "killed") nil)
                ;; b is killed, a is not - a goes before b
                (t t)))))))
+
+(defun agent-shell-manager--entries ()
+  "Return list of entries for tabulated-list."
+  (mapcar
+   (lambda (buffer)
+     (list buffer
+           (vector
+            (agent-shell-manager--field-value 'buffer buffer)
+            (agent-shell-manager--field-value 'status buffer)
+            (agent-shell-manager--field-value 'mode   buffer)
+            (agent-shell-manager--field-value 'model  buffer)
+            (agent-shell-manager--field-value 'perms  buffer)
+            (agent-shell-manager--field-value 'path   buffer))))
+   (agent-shell-manager--sorted-buffers)))
 
 (defun agent-shell-manager-refresh ()
   "Refresh the buffer list."
