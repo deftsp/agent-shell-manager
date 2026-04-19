@@ -74,6 +74,8 @@ Once the manager buffer is open, you can use these keys:
 | `t`         | View traffic logs                         |
 | `l`         | Toggle logging                            |
 | `q`         | Quit manager window                       |
+| `TAB`       | Next agent block (vertical layout only)   |
+| `S-TAB`     | Previous agent block (vertical layout only) |
 
 ## Configuration
 
@@ -94,6 +96,37 @@ popper.el, etc.), giving you full control over window placement:
 ;; Use dedicated window with user-controlled placement
 (setq agent-shell-manager-side nil)
 ```
+
+### Layout
+
+Two layouts are available via `agent-shell-manager-layout`:
+
+- `table` (default): original horizontal tabulated-list view.
+- `vertical`: each agent is rendered as a multi-line block with one
+  field per line.  Suitable for narrow side windows (e.g. a 50-column
+  left panel) where the full table would be truncated.
+
+```elisp
+(setq agent-shell-manager-layout 'vertical)
+```
+
+Additional options for vertical layout:
+
+```elisp
+;; Fields to display and their labels, in order.
+(setq agent-shell-manager-vertical-fields
+      '((buffer . "Buffer")
+        (status . "Status")
+        (mode   . "Mode")
+        (model  . "Model")
+        (perms  . "Perms")
+        (path   . "Path")))
+
+;; Separator between agent blocks (set to "" to disable).
+(setq agent-shell-manager-vertical-separator (make-string 40 ?─))
+```
+
+In vertical layout, `TAB` / `S-TAB` jump between agent blocks.
 
 ## Status Indicators
 

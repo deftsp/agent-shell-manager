@@ -65,21 +65,57 @@ the manager window can also be closed by `delete-other-windows' (C-x 1)."
   :type 'boolean
   :group 'agent-shell-manager)
 
+(defcustom agent-shell-manager-layout 'table
+  "Layout style for the manager buffer.
+`table' uses the original horizontal tabulated-list view.
+`vertical' shows each agent as a multi-line block, suitable for
+narrow side windows where the full table would be truncated."
+  :type '(choice (const :tag "Horizontal table" table)
+                 (const :tag "Vertical blocks" vertical))
+  :group 'agent-shell-manager)
+
+(defcustom agent-shell-manager-vertical-fields
+  '((buffer . "Buffer")
+    (status . "Status")
+    (mode   . "Mode")
+    (model  . "Model")
+    (perms  . "Perms")
+    (path   . "Path"))
+  "Fields to display in vertical layout, in order.
+Each entry is (FIELD-KEY . LABEL).  Valid FIELD-KEYs are those
+handled by `agent-shell-manager--field-value'."
+  :type '(alist :key-type symbol :value-type string)
+  :group 'agent-shell-manager)
+
+(defcustom agent-shell-manager-vertical-separator ""
+  "Separator line inserted between agent blocks in vertical layout.
+A blank line is always inserted between blocks; this string, when
+non-empty, is inserted on its own line before that blank line (e.g.
+set to (make-string 40 ?─) to draw a horizontal rule)."
+  :type 'string
+  :group 'agent-shell-manager)
+
+(defun agent-shell-manager--apply-keybindings (map)
+  "Apply the shared agent-shell-manager keybindings to MAP."
+  (define-key map (kbd "RET") #'agent-shell-manager-goto)
+  (define-key map (kbd "g")   #'agent-shell-manager-refresh)
+  (define-key map (kbd "q")   #'quit-window)
+  (define-key map (kbd "k")   #'agent-shell-manager-kill)
+  (define-key map (kbd "c")   #'agent-shell-manager-new)
+  (define-key map (kbd "r")   #'agent-shell-manager-restart)
+  (define-key map (kbd "d")   #'agent-shell-manager-delete-killed)
+  (define-key map (kbd "m")   #'agent-shell-manager-set-mode)
+  (define-key map (kbd "M")   #'agent-shell-manager-set-model)
+  (define-key map (kbd "C-c C-c") #'agent-shell-manager-interrupt)
+  (define-key map (kbd "t")   #'agent-shell-manager-view-traffic)
+  (define-key map (kbd "l")   #'agent-shell-manager-toggle-logging))
+
 (defvar agent-shell-manager-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map tabulated-list-mode-map)
-    (define-key map (kbd "RET") #'agent-shell-manager-goto)
-    (define-key map (kbd "g") #'agent-shell-manager-refresh)
-    (define-key map (kbd "q") #'quit-window)
-    (define-key map (kbd "k") #'agent-shell-manager-kill)
-    (define-key map (kbd "c") #'agent-shell-manager-new)
-    (define-key map (kbd "r") #'agent-shell-manager-restart)
-    (define-key map (kbd "d") #'agent-shell-manager-delete-killed)
-    (define-key map (kbd "m") #'agent-shell-manager-set-mode)
-    (define-key map (kbd "M") #'agent-shell-manager-set-model)
-    (define-key map (kbd "C-c C-c") #'agent-shell-manager-interrupt)
-    (define-key map (kbd "t") #'agent-shell-manager-view-traffic)
-    (define-key map (kbd "l") #'agent-shell-manager-toggle-logging)
+    (agent-shell-manager--apply-keybindings map)
+    (define-key map (kbd "TAB")       #'agent-shell-manager-next-agent)
+    (define-key map (kbd "<backtab>") #'agent-shell-manager-previous-agent)
     map)
   "Keymap for `agent-shell-manager-mode'.")
 
@@ -104,6 +140,8 @@ Key bindings:
 \\[agent-shell-manager-interrupt] - Interrupt the agent at point
 \\[agent-shell-manager-view-traffic] - View traffic logs for agent at point
 \\[agent-shell-manager-toggle-logging] - Toggle ACP logging
+\\[agent-shell-manager-next-agent] - Move to next agent (vertical layout)
+\\[agent-shell-manager-previous-agent] - Move to previous agent (vertical layout)
 \\[quit-window] - Quit the manager window
 
 \\{agent-shell-manager-mode-map}"
@@ -117,14 +155,15 @@ Key bindings:
   (setq tabulated-list-padding 2)
   (setq tabulated-list-sort-key (cons "Buffer" nil))
   (tabulated-list-init-header)
+  (agent-shell-manager--setup-refresh-timer))
 
+(defun agent-shell-manager--setup-refresh-timer ()
+  "(Re)start the auto-refresh timer for the current manager buffer."
   (when agent-shell-manager--refresh-timer
     (cancel-timer agent-shell-manager--refresh-timer))
-
   ;; Set up auto-refresh timer (refresh every 2 seconds)
   (setq agent-shell-manager--refresh-timer
         (run-with-timer 2 2 #'agent-shell-manager-refresh))
-
   ;; Cancel timer when buffer is killed
   (add-hook 'kill-buffer-hook
             (lambda ()
@@ -134,8 +173,12 @@ Key bindings:
             nil t))
 
 (defun agent-shell-manager--buffer-at-point ()
-  "Return the agent-shell buffer for the entry at point, or nil."
-  (tabulated-list-get-id))
+  "Return the agent-shell buffer for the entry at point, or nil.
+Dispatches on `agent-shell-manager-layout'."
+  (pcase agent-shell-manager-layout
+    ('table    (tabulated-list-get-id))
+    ('vertical (get-text-property (point) 'agent-shell-manager-buffer))
+    (_         (tabulated-list-get-id))))
 
 (defun agent-shell-manager--get-status (buffer)
   "Get the current status of `agent-shell' BUFFER.
@@ -358,14 +401,107 @@ FIELD is a symbol: `buffer', `status', `mode', `model', `perms' or `path'."
             (agent-shell-manager--field-value 'path   buffer))))
    (agent-shell-manager--sorted-buffers)))
 
+(defun agent-shell-manager--render-vertical ()
+  "Render agent-shell buffer list in vertical block layout."
+  (let* ((inhibit-read-only t)
+         (saved-buffer (agent-shell-manager--buffer-at-point))
+         (fields agent-shell-manager-vertical-fields)
+         (label-width (if fields
+                          (apply #'max (mapcar (lambda (f) (length (cdr f)))
+                                               fields))
+                        0)))
+    (erase-buffer)
+    (let ((buffers (agent-shell-manager--sorted-buffers)))
+      (if (null buffers)
+          (insert (propertize "No agent-shell buffers.\n"
+                              'face 'font-lock-comment-face))
+        (dolist (buffer buffers)
+          (let ((block-start (point)))
+            (dolist (field fields)
+              (let* ((key   (car field))
+                     (label-text (concat (cdr field) ":"))
+                     (label (propertize label-text
+                                        'face 'font-lock-keyword-face))
+                     (pad (make-string
+                           (max 1 (- (+ label-width 2) (length label-text)))
+                           ?\s))
+                     (value (agent-shell-manager--field-value key buffer)))
+                (insert label pad value "\n")))
+            (add-text-properties block-start (point)
+                                 `(agent-shell-manager-buffer ,buffer))
+            (unless (string-empty-p agent-shell-manager-vertical-separator)
+              (insert agent-shell-manager-vertical-separator "\n"))
+            ;; Blank line between blocks
+            (insert "\n")))))
+    ;; Restore cursor on the same agent block when possible
+    (goto-char (point-min))
+    (when saved-buffer
+      (let (found)
+        (while (and (not found) (not (eobp)))
+          (if (eq (get-text-property (point) 'agent-shell-manager-buffer)
+                  saved-buffer)
+              (setq found t)
+            (forward-line 1)))
+        (unless found (goto-char (point-min)))))))
+
+(defun agent-shell-manager-next-agent ()
+  "Move point to the start of the next agent block (vertical layout)."
+  (interactive)
+  (let* ((start (point))
+         (here  (get-text-property (point) 'agent-shell-manager-buffer))
+         (pos   (point)))
+    ;; 1. If we are inside a block, first jump to just past this block.
+    (when here
+      (setq pos (or (next-single-property-change
+                     pos 'agent-shell-manager-buffer)
+                    (point-max)))
+      (goto-char pos))
+    ;; 2. Skip over the separator (region with nil property) to the next block.
+    (while (and (< (point) (point-max))
+                (null (get-text-property (point) 'agent-shell-manager-buffer)))
+      (forward-line 1))
+    (when (eobp)
+      (goto-char start))))
+
+(defun agent-shell-manager-previous-agent ()
+  "Move point to the start of the previous agent block (vertical layout)."
+  (interactive)
+  (let* ((start (point))
+         (here  (get-text-property (point) 'agent-shell-manager-buffer)))
+    ;; If at the very top of a block, step back one char so that
+    ;; `previous-single-property-change' leaves this block.
+    (when (and here
+               (> (point) (point-min))
+               (not (eq (get-text-property (1- (point))
+                                           'agent-shell-manager-buffer)
+                        here)))
+      (backward-char 1))
+    ;; Walk back until we find a block.
+    (while (and (> (point) (point-min))
+                (null (get-text-property (point) 'agent-shell-manager-buffer)))
+      (backward-char 1))
+    (when (get-text-property (point) 'agent-shell-manager-buffer)
+      ;; Now jump to the beginning of this block.
+      (let ((top (previous-single-property-change
+                  (1+ (point)) 'agent-shell-manager-buffer)))
+        (goto-char (or top (point-min)))))
+    (beginning-of-line)
+    ;; If we didn't actually move, restore original point.
+    (when (= (point) start)
+      (goto-char start))))
+
 (defun agent-shell-manager-refresh ()
   "Refresh the buffer list."
   (interactive)
   (when (and agent-shell-manager--global-buffer
              (buffer-live-p agent-shell-manager--global-buffer))
     (with-current-buffer agent-shell-manager--global-buffer
-      (setq tabulated-list-entries (agent-shell-manager--entries))
-      (tabulated-list-print t))))
+      (pcase agent-shell-manager-layout
+        ('vertical
+         (agent-shell-manager--render-vertical))
+        (_
+         (setq tabulated-list-entries (agent-shell-manager--entries))
+         (tabulated-list-print t))))))
 
 (defun agent-shell-manager--hide-window ()
   "Hide the manager window if `agent-shell-manager-transient' is non-nil."
@@ -586,6 +722,9 @@ by `delete-other-windows' (C-x 1)."
         (setq agent-shell-manager--global-buffer buffer)
         (with-current-buffer buffer
           (agent-shell-manager-mode)
+          ;; In vertical layout, suppress the tabulated-list header line
+          (when (eq agent-shell-manager-layout 'vertical)
+            (setq-local header-line-format nil))
           (agent-shell-manager-refresh))
         ;; Make the window dedicated so it can't be used for other buffers
         (set-window-dedicated-p window t)
