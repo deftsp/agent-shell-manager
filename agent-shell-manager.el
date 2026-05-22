@@ -246,6 +246,18 @@ Returns one of: waiting, ready, working, killed, or unknown."
   "Get the buffer name for BUFFER."
   (buffer-name buffer))
 
+(defun agent-shell-manager--get-compact-buffer-name (buffer)
+  "Get a compact buffer name for BUFFER, optimized for narrow windows."
+  (let ((name (agent-shell-manager--get-buffer-name buffer)))
+    (if (string-match "^\\(.*?\\) Agent @ \\(.*\\)$" name)
+        (let ((agent (match-string 1 name))
+              (target (match-string 2 name)))
+          (cond
+           ((string-empty-p target) agent)
+           ((string-empty-p agent) target)
+           (t (format "%s (%s)" target agent))))
+      name)))
+
 (defun agent-shell-manager--get-session-status (buffer)
   "Get session status for BUFFER."
   (with-current-buffer buffer
@@ -433,7 +445,9 @@ FIELD is a symbol: `buffer', `status', `mode', `model', `perms' or `path'."
                      (pad (make-string
                            (max 1 (- (+ label-width 2) (length label-text)))
                            ?\s))
-                     (value (agent-shell-manager--field-value key buffer)))
+                     (value (if (eq key 'buffer)
+                                (agent-shell-manager--get-compact-buffer-name buffer)
+                              (agent-shell-manager--field-value key buffer))))
                 (insert label pad value "\n")))
             (add-text-properties block-start (point)
                                  `(agent-shell-manager-buffer ,buffer))
