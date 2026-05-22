@@ -43,6 +43,9 @@
 (require 'agent-shell)
 (require 'tabulated-list)
 
+(declare-function agent-shell-get-model-name "agent-shell" (state))
+(declare-function agent-shell-get-mode-name "agent-shell" (state))
+
 (defgroup agent-shell-manager nil
   "Buffer manager for `agent-shell'."
   :group 'agent-shell)
@@ -289,11 +292,14 @@ Returns a user-friendly status string with appropriate face."
 (defun agent-shell-manager--get-session-mode (buffer)
   "Get the current session mode for BUFFER."
   (with-current-buffer buffer
-    (if (and (boundp 'agent-shell--state)
-             (map-nested-elt agent-shell--state '(:session :mode-id)))
-        (or (agent-shell--resolve-session-mode-name
-             (map-nested-elt agent-shell--state '(:session :mode-id))
-             (map-nested-elt agent-shell--state '(:session :modes)))
+    (if (boundp 'agent-shell--state)
+        (or (and (fboundp 'agent-shell-get-mode-name)
+                 (agent-shell-get-mode-name agent-shell--state))
+            (and (map-nested-elt agent-shell--state '(:session :mode-id))
+                 (or (agent-shell--resolve-session-mode-name
+                      (map-nested-elt agent-shell--state '(:session :mode-id))
+                      (map-nested-elt agent-shell--state '(:session :modes)))
+                     (map-nested-elt agent-shell--state '(:session :mode-id))))
             "-")
       "-")))
 
@@ -310,15 +316,17 @@ Returns a user-friendly status string with appropriate face."
 (defun agent-shell-manager--get-model-id (buffer)
   "Get the current model ID for BUFFER."
   (with-current-buffer buffer
-    (if (and (boundp 'agent-shell--state)
-             (map-nested-elt agent-shell--state '(:session :model-id)))
-        (let* ((model-id (map-nested-elt agent-shell--state '(:session :model-id)))
-               (models (map-nested-elt agent-shell--state '(:session :models)))
-               (model-info (seq-find (lambda (model)
-                                       (string= (map-elt model :model-id) model-id))
-                                     models)))
-          (or (and model-info (map-elt model-info :name))
-              model-id))
+    (if (boundp 'agent-shell--state)
+        (or (and (fboundp 'agent-shell-get-model-name)
+                 (agent-shell-get-model-name agent-shell--state))
+            (when-let* ((model-id (map-nested-elt agent-shell--state '(:session :model-id))))
+              (let* ((models (map-nested-elt agent-shell--state '(:session :models)))
+                     (model-info (seq-find (lambda (model)
+                                             (string= (map-elt model :model-id) model-id))
+                                           models)))
+                (or (and model-info (map-elt model-info :name))
+                    model-id)))
+            "-")
       "-")))
 
 (defun agent-shell-manager--count-pending-permissions (buffer)
@@ -640,7 +648,7 @@ Kills the current process and starts a new one with the same config if possible.
     (with-current-buffer buffer
       (unless (derived-mode-p 'agent-shell-mode)
         (user-error "Not an agent-shell buffer"))
-      (agent-shell-set-session-mode))
+      (agent-shell-set-session-mode #'agent-shell-manager-refresh))
     (agent-shell-manager-refresh)))
 
 (defun agent-shell-manager-set-model ()
@@ -652,7 +660,7 @@ Kills the current process and starts a new one with the same config if possible.
     (with-current-buffer buffer
       (unless (derived-mode-p 'agent-shell-mode)
         (user-error "Not an agent-shell buffer"))
-      (agent-shell-set-session-model))
+      (agent-shell-set-session-model #'agent-shell-manager-refresh))
     (agent-shell-manager-refresh)))
 
 (defun agent-shell-manager-interrupt ()
