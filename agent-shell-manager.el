@@ -203,7 +203,13 @@ Returns one of: waiting, ready, working, killed, or unknown."
                                         (process-live-p comint-proc)
                                         (memq (process-status comint-proc) '(run open listen connect stop))))
              ;; Both processes must be alive for the shell to be truly alive
-             (process-alive (and acp-process-alive comint-process-alive)))
+             (process-alive (and acp-process-alive comint-process-alive))
+             (has-active-requests (map-elt state :active-requests))
+             (has-pending-permission
+              (seq-find (lambda (tool-call)
+                          (and (map-elt (cdr tool-call) :permission-request-id)
+                               (equal (map-elt (cdr tool-call) :status) "pending")))
+                        (map-elt state :tool-calls))))
         (cond
          ;; Check if comint process is dead or missing - if so, always report killed
          ((or (not comint-proc)
@@ -216,22 +222,19 @@ Returns one of: waiting, ready, working, killed, or unknown."
                    (and (processp acp-proc)
                         (not acp-process-alive))))
           "killed")
-         ;; Check if there are pending tool calls
-         ((and process-alive
-               (map-elt state :tool-calls)
-               (> (length (map-elt state :tool-calls)) 0))
-          ;; Check if any tool call is pending permission
-          (let ((has-pending-permission
-                 (seq-find (lambda (tool-call)
-                             (map-elt (cdr tool-call) :permission-request-id))
-                           (map-elt state :tool-calls))))
-            (if has-pending-permission
-                "waiting"
-              "working")))
-         ;; Check if buffer is busy (shell-maker function)
+         ;; Check if any tool call is waiting for permission.
+         ((and process-alive has-pending-permission)
+          "waiting")
+         ;; Check if an ACP request is currently in flight.
+         ((and process-alive has-active-requests)
+          "working")
+         ;; During initialization/restoration, a busy shell without an active
+         ;; session is still working.  Once a session exists, active requests
+         ;; are more reliable than stale shell/tool-call state.
          ((and process-alive
                (fboundp 'shell-maker-busy)
-               (shell-maker-busy))
+               (shell-maker-busy)
+               (not (map-nested-elt state '(:session :id))))
           "working")
          ;; Check if session is active (only if process is alive)
          ((and process-alive
