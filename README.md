@@ -33,8 +33,7 @@
 - **Smart Display**:
   - Killed processes are displayed at the bottom in red
   - Status-based color coding for easy visual scanning
-  - Customizable window placement (left, right, top, bottom, or
-    user-controlled)
+  - Customizable window placement (left, right, or user-controlled)
 
 ## Installation
 
@@ -54,7 +53,7 @@
 M-x agent-shell-manager-toggle
 ```
 
-This command toggles the visibility of the agent-shell buffer manager. By default, it appears at the bottom of the frame.
+This command toggles the visibility of the agent-shell buffer manager. By default, it appears on the right side of the frame.
 
 ### Key Bindings
 
@@ -84,8 +83,8 @@ Once the manager buffer is open, you can use these keys:
 Customize where the manager window appears:
 
 ```elisp
-;; Options: 'left, 'right, 'top, 'bottom, or nil
-(setq agent-shell-manager-side 'bottom)
+;; Options: 'left, 'right, or nil
+(setq agent-shell-manager-side 'right)
 ```
 
 When set to `nil`, the package defers to your `display-buffer-alist`

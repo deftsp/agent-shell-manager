@@ -50,15 +50,13 @@
   "Buffer manager for `agent-shell'."
   :group 'agent-shell)
 
-(defcustom agent-shell-manager-side 'bottom
+(defcustom agent-shell-manager-side 'left
   "Side of the frame to display the `agent-shell' manager.
-Can be 'left, 'right, 'top, 'bottom, or nil.  When nil, buffer display
-is controlled by the user's `display-buffer-alist'."
+Can be 'left, 'right, or nil.  When nil, buffer display is controlled
+by the user's `display-buffer-alist'."
   :type '(choice (const :tag "Left" left)
-          (const :tag "Right" right)
-          (const :tag "Top" top)
-          (const :tag "Bottom" bottom)
-          (const :tag "User-controlled" nil))
+                 (const :tag "Right" right)
+                 (const :tag "User-controlled" nil))
   :group 'agent-shell-manager)
 
 (defcustom agent-shell-manager-transient nil
@@ -98,6 +96,13 @@ set to (make-string 40 ?─) to draw a horizontal rule)."
   :type 'string
   :group 'agent-shell-manager)
 
+(defcustom agent-shell-manager-refresh-interval 2
+  "Seconds between automatic refreshes of the manager buffer.
+Set to nil to disable automatic refresh entirely."
+  :type '(choice (number :tag "Interval (seconds)")
+                 (const  :tag "Disabled" nil))
+  :group 'agent-shell-manager)
+
 (defun agent-shell-manager--apply-keybindings (map)
   "Apply the shared agent-shell-manager keybindings to MAP."
   (define-key map (kbd "RET") #'agent-shell-manager-goto)
@@ -124,6 +129,11 @@ set to (make-string 40 ?─) to draw a horizontal rule)."
 
 (defvar-local agent-shell-manager--refresh-timer nil
   "Timer for auto-refreshing the buffer list.")
+
+(defvar-local agent-shell-manager--render-cache nil
+  "Cached state snapshot from the last vertical render.
+Used by `agent-shell-manager--auto-refresh' to skip re-renders when
+agent state has not changed since the previous refresh.")
 
 (defvar agent-shell-manager--global-buffer nil
   "The global manager buffer for `agent-shell' buffer list.")
@@ -164,9 +174,14 @@ Key bindings:
   "(Re)start the auto-refresh timer for the current manager buffer."
   (when agent-shell-manager--refresh-timer
     (cancel-timer agent-shell-manager--refresh-timer))
-  ;; Set up auto-refresh timer (refresh every 2 seconds)
-  (setq agent-shell-manager--refresh-timer
-        (run-with-timer 2 2 #'agent-shell-manager-refresh))
+  (setq agent-shell-manager--refresh-timer nil)
+  ;; Set up auto-refresh timer using the configured interval.
+  ;; When `agent-shell-manager-refresh-interval' is nil, auto-refresh is disabled.
+  (when agent-shell-manager-refresh-interval
+    (setq agent-shell-manager--refresh-timer
+          (run-with-timer agent-shell-manager-refresh-interval
+                          agent-shell-manager-refresh-interval
+                          #'agent-shell-manager--auto-refresh)))
   ;; Cancel timer when buffer is killed
   (add-hook 'kill-buffer-hook
             (lambda ()
@@ -365,6 +380,35 @@ Returns a propertized string with yellow/warning face for non-zero counts."
             "-"))
       "-")))
 
+(defun agent-shell-manager--pending-count (buffer)
+  "Return the count of pending permission requests for BUFFER as an integer."
+  (with-current-buffer buffer
+    (if (and (boundp 'agent-shell--state)
+             (map-elt agent-shell--state :tool-calls))
+        (let ((count 0))
+          (map-do
+           (lambda (_tool-call-id tool-call-data)
+             (when (and (map-elt tool-call-data :permission-request-id)
+                        (equal (map-elt tool-call-data :status) "pending"))
+               (setq count (1+ count))))
+           (map-elt agent-shell--state :tool-calls))
+          count)
+      0)))
+
+(defun agent-shell-manager--state-snapshot ()
+  "Return a snapshot of current agent state for change detection.
+Each element is (buffer-name status mode model pending-count cwd).
+Used by `agent-shell-manager--auto-refresh' to avoid re-rendering
+the vertical layout when nothing has changed."
+  (mapcar (lambda (buffer)
+            (list (buffer-name buffer)
+                  (agent-shell-manager--get-status buffer)
+                  (agent-shell-manager--get-session-mode buffer)
+                  (agent-shell-manager--get-model-id buffer)
+                  (agent-shell-manager--pending-count buffer)
+                  (agent-shell-manager--get-cwd buffer)))
+          (agent-shell-manager--sorted-buffers)))
+
 (defun agent-shell-manager--status-face (status)
   "Return face for STATUS string."
   (cond
@@ -424,50 +468,55 @@ FIELD is a symbol: `buffer', `status', `mode', `model', `perms' or `path'."
             (agent-shell-manager--field-value 'path   buffer))))
    (agent-shell-manager--sorted-buffers)))
 
-(defun agent-shell-manager--render-vertical ()
-  "Render agent-shell buffer list in vertical block layout."
+(defun agent-shell-manager--render-vertical (&optional force)
+  "Render agent-shell buffer list in vertical block layout.
+With FORCE non-nil, skip the change-detection cache and always re-render."
   (let* ((inhibit-read-only t)
-         (saved-buffer (agent-shell-manager--buffer-at-point))
-         (fields agent-shell-manager-vertical-fields)
-         (label-width (if fields
-                          (apply #'max (mapcar (lambda (f) (length (cdr f)))
-                                               fields))
-                        0)))
-    (erase-buffer)
-    (let ((buffers (agent-shell-manager--sorted-buffers)))
-      (if (null buffers)
-          (insert (propertize "No agent-shell buffers.\n"
-                              'face 'font-lock-comment-face))
-        (dolist (buffer buffers)
-          (let ((block-start (point)))
-            (dolist (field fields)
-              (let* ((key   (car field))
-                     (label-text (concat (cdr field) ":"))
-                     (label (propertize label-text
-                                        'face 'font-lock-keyword-face))
-                     (pad (make-string
-                           (max 1 (- (+ label-width 2) (length label-text)))
-                           ?\s))
-                     (value (if (eq key 'buffer)
-                                (agent-shell-manager--get-compact-buffer-name buffer)
-                              (agent-shell-manager--field-value key buffer))))
-                (insert label pad value "\n")))
-            (add-text-properties block-start (point)
-                                 `(agent-shell-manager-buffer ,buffer))
-            (unless (string-empty-p agent-shell-manager-vertical-separator)
-              (insert agent-shell-manager-vertical-separator "\n"))
-            ;; Blank line between blocks
-            (insert "\n")))))
-    ;; Restore cursor on the same agent block when possible
-    (goto-char (point-min))
-    (when saved-buffer
-      (let (found)
-        (while (and (not found) (not (eobp)))
-          (if (eq (get-text-property (point) 'agent-shell-manager-buffer)
-                  saved-buffer)
-              (setq found t)
-            (forward-line 1)))
-        (unless found (goto-char (point-min)))))))
+         (new-snapshot (agent-shell-manager--state-snapshot)))
+    ;; Skip re-render when state is unchanged and this is a timer-driven refresh.
+    (unless (and (not force) (equal new-snapshot agent-shell-manager--render-cache))
+      (setq agent-shell-manager--render-cache new-snapshot)
+      (let* ((saved-buffer (agent-shell-manager--buffer-at-point))
+             (fields agent-shell-manager-vertical-fields)
+             (label-width (if fields
+                              (apply #'max (mapcar (lambda (f) (length (cdr f)))
+                                                   fields))
+                            0)))
+        (erase-buffer)
+        (let ((buffers (agent-shell-manager--sorted-buffers)))
+          (if (null buffers)
+              (insert (propertize "No agent-shell buffers.\n"
+                                  'face 'font-lock-comment-face))
+            (dolist (buffer buffers)
+              (let ((block-start (point)))
+                (dolist (field fields)
+                  (let* ((key   (car field))
+                         (label-text (concat (cdr field) ":"))
+                         (label (propertize label-text
+                                            'face 'font-lock-keyword-face))
+                         (pad (make-string
+                               (max 1 (- (+ label-width 2) (length label-text)))
+                               ?\s))
+                         (value (if (eq key 'buffer)
+                                    (agent-shell-manager--get-compact-buffer-name buffer)
+                                  (agent-shell-manager--field-value key buffer))))
+                    (insert label pad value "\n")))
+                (add-text-properties block-start (point)
+                                     `(agent-shell-manager-buffer ,buffer))
+                (unless (string-empty-p agent-shell-manager-vertical-separator)
+                  (insert agent-shell-manager-vertical-separator "\n"))
+                ;; Blank line between blocks
+                (insert "\n")))))
+        ;; Restore cursor on the same agent block when possible
+        (goto-char (point-min))
+        (when saved-buffer
+          (let (found)
+            (while (and (not found) (not (eobp)))
+              (if (eq (get-text-property (point) 'agent-shell-manager-buffer)
+                      saved-buffer)
+                  (setq found t)
+                (forward-line 1)))
+            (unless found (goto-char (point-min)))))))))
 
 (defun agent-shell-manager-next-agent ()
   "Move point to the start of the next agent block (vertical layout)."
@@ -515,6 +564,23 @@ FIELD is a symbol: `buffer', `status', `mode', `model', `perms' or `path'."
     (when (= (point) start)
       (goto-char start))))
 
+(defun agent-shell-manager--auto-refresh ()
+  "Timer callback: refresh the manager buffer only when its window is visible.
+Skips the re-render entirely when the buffer is not displayed, and uses
+change-detection via `agent-shell-manager--render-cache' to skip re-renders
+when agent state has not changed since the last refresh."
+  (when (and agent-shell-manager--global-buffer
+             (buffer-live-p agent-shell-manager--global-buffer)
+             (get-buffer-window agent-shell-manager--global-buffer t))
+    (with-current-buffer agent-shell-manager--global-buffer
+      (pcase agent-shell-manager-layout
+        ('vertical
+         ;; force=nil  →  cache check is active
+         (agent-shell-manager--render-vertical))
+        (_
+         (setq tabulated-list-entries (agent-shell-manager--entries))
+         (tabulated-list-print t))))))
+
 (defun agent-shell-manager-refresh ()
   "Refresh the buffer list."
   (interactive)
@@ -523,7 +589,8 @@ FIELD is a symbol: `buffer', `status', `mode', `model', `perms' or `path'."
     (with-current-buffer agent-shell-manager--global-buffer
       (pcase agent-shell-manager-layout
         ('vertical
-         (agent-shell-manager--render-vertical))
+         ;; force=t  →  always re-render (cache is bypassed)
+         (agent-shell-manager--render-vertical t))
         (_
          (setq tabulated-list-entries (agent-shell-manager--entries))
          (tabulated-list-print t))))))
@@ -724,24 +791,16 @@ by `delete-other-windows' (C-x 1)."
         (delete-window window)
       ;; Window is not visible, show it
       (let ((window (if agent-shell-manager-side
-                        ;; Use side window with configured position
-                        (let ((size-param (if (memq agent-shell-manager-side
-                                                    '(left right))
-                                              'window-width
-                                            'window-height)))
-                          (display-buffer-in-side-window
-                           buffer
-                           `((side . ,agent-shell-manager-side)
-                             (slot . 0)
-                             (,size-param . 0.3)
-                             (preserve-size . ,(if (memq
-                                                    agent-shell-manager-side
-                                                    '(left right))
-                                                   '(t . nil)
-                                                 '(nil . t)))
-                             ,@(unless agent-shell-manager-transient
-                                 '((window-parameters .
-                                    ((no-delete-other-windows . t))))))))
+                        ;; Use a left/right side window with configured width.
+                        (display-buffer-in-side-window
+                         buffer
+                         `((side . ,agent-shell-manager-side)
+                           (slot . 0)
+                           (window-width . 0.3)
+                           (preserve-size . (t . nil))
+                           ,@(unless agent-shell-manager-transient
+                               '((window-parameters .
+                                  ((no-delete-other-windows . t)))))))
                       ;; Use regular window, let user's config control display
                       (display-buffer buffer))))
         (setq agent-shell-manager--global-buffer buffer)
